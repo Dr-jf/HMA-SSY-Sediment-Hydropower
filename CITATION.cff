@@ -1,0 +1,17 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite this version of the code."
+type: software
+title: "High Mountain Asia SSY, Reservoir Sediment and Hydropower Core Models"
+authors:
+  - family-names: Deng
+    given-names: Rui
+version: 1.0.0
+date-released: 2026-11-07
+license: MIT
+url: "https://github.com/Dr-jf/HMA-SSY-Sediment-Hydropower"
+repository-code: "https://github.com/Dr-jf/HMA-SSY-Sediment-Hydropower"
+keywords:
+  - sediment yield
+  - reservoir sedimentation
+  - hydropower
+  - High Mountain Asia
