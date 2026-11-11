@@ -1,87 +1,64 @@
-# High Mountain Asia SSY, reservoir sediment and hydropower core models
+# Sediment yield, reservoir trapping and hydropower in High Mountain Asia
 
-Core Python research code by **Rui Deng** for specific sediment yield (SSY), reservoir sediment trapping and historical hydropower simulation.
+This repository contains the Python examples for specific sediment yield (SSY), reservoir sediment trapping and historical hydropower generation in High Mountain Asia. The input tables are held separately.
 
-This release contains four workflows:
+## Scripts
 
-| Entry point | Purpose |
+| Script | Calculation |
 | --- | --- |
-| `scripts/01_train_ssy.py` | Train the 17-predictor, five-member square-root XGBoost model |
-| `scripts/02_historical_sediment.py` | Simulate daily reservoir sediment trapping in 1980–2019 |
-| `scripts/03_historical_hydropower_baseline.py` | Simulate historical generation with fixed, unsilted active storage |
-| `scripts/04_historical_hydropower_sediment.py` | Simulate generation with annual storage updates and calculate signed net differences |
+| [`ssy_model.py`](ssy_model.py) | Fit the 17-predictor XGBoost ensemble on square-root SSY. The default 70/30 split of 1,963 records (1,911 + 52) gives 1,374 training and 589 validation records. |
+| [`reservoir_sediment.py`](reservoir_sediment.py) | Calculate daily and annual trapped sediment for the 325-reservoir network during 1980–2019. |
+| [`hydropower_baseline.py`](hydropower_baseline.py) | Calculate daily generation with fixed original active storage. |
+| [`hydropower_sedimentation.py`](hydropower_sedimentation.py) | Calculate daily generation with annual active-storage updates and pair it with the baseline to estimate generation loss. |
 
-**No confidential observations, reservoir tables, fitted model weights or research results are distributed.** The repository includes source code and code-generated artificial tests only. Plotting, the 12-predictor comparison, calibration and future scenarios are outside this release.
+## Running the examples
 
-## Scope and reproducibility
+Use Python 3.11 or 3.12. Install the dependencies and run the scripts from the repository directory.
 
-The SSY input configuration expects **1,963 records** and 17 predictors. A seeded 70/30 record split produces 1,374 training and 589 validation records. The fixed tree recipe comes from earlier model development; it has not been reoptimized or evaluated on the additional records in this release. No manuscript accuracy scores are encoded or promised.
-
-The reservoir and hydropower workflows start in 1980 and end in 2019 by default. They do not run a pre-1980 spin-up or load an earlier sedimentation state. Original capacities are initialized at the start of the study or commissioning, so the comparison describes **sedimentation accumulated within the simulated historical period**, rather than total sedimentation since construction. It does not reproduce a lifetime calculation that includes an earlier state.
-
-Prepared, locally supplied tables are the starting interface. The source GIS extraction, river-reach matching and environmental-data preparation are not bundled. Users must establish that their prepared inputs use the documented spatial definitions, units and topology.
-
-Read the retained sediment water-volume convention and the annual hydropower timing assumptions in [the methods](docs/methods.md) before interpreting a result. Passing software tests is not independent validation of those scientific assumptions.
-
-## Installation
-
-Use Python **3.11 or 3.12** on a conventional CPU computer. No GPU, cloud account or proprietary software is required. Create an isolated environment, then install from the repository root:
-
-```bash
-python -m venv .venv
-# Linux/macOS: source .venv/bin/activate
-# Windows PowerShell: .venv\Scripts\Activate.ps1
-python -m pip install -e ".[test]"
+```sh
+python -m pip install numpy==1.26.4 pandas==2.2.3 scipy==1.12.0 scikit-learn==1.5.2 xgboost==2.1.3
+python ssy_model.py --input inputs/ssy.csv --output outputs/ssy
+python reservoir_sediment.py --dams inputs/sediment_dams.csv --discharge inputs/discharge.csv --ssy inputs/annual_ssy.csv --output outputs/sediment
+python hydropower_baseline.py --dams inputs/hydropower_dams.csv --discharge inputs/discharge.csv --output outputs/baseline
+python hydropower_sedimentation.py --dams inputs/hydropower_dams.csv --discharge inputs/discharge.csv --annual-sediment outputs/sediment/annual_sediment.csv --baseline outputs/baseline/daily_generation.csv --output outputs/sedimentation
 ```
 
-Exact core package versions are specified in `requirements.txt` and `pyproject.toml`. Installation time depends on network access and whether wheels are cached. Runtime and memory use for a research run depend on the number of reservoirs and dates; no production benchmark on the confidential data is claimed.
+Use a new or empty directory for each output. Keep the baseline's `manifest.json` next to its `daily_generation.csv` so the paired run can check the inputs and dates. Keep both hydropower scripts in the same directory.
 
-## Check the installation without research data
+## Input tables
 
-```bash
-python -m pytest
-python scripts/smoke_test.py
-```
+Supply UTF-8 CSVs with one header row. Keep `dam_id` consistent across tables, including leading zeros.
 
-The smoke test creates artificial input tables in a temporary directory, exercises the four workflows, and removes the temporary files. Artificial inputs are not observations, are not fitted to published results, and cannot be used to infer research performance. No dataset file is shipped in the repository.
+- **SSY training.** One row per record with `SSY` (t km⁻² yr⁻¹) and the predictors `PGA`, `S`, `V`, `P`, `T`, `L`, `Ksn`, `A`, `G`, `F`, `R`, `GMC`, `Q`, `SC`, `SM`, `DeltaG` and `DeltaSC`. Use the study's predictor definitions and lithology encoding. The annual runoff predictor `Q` is in mm yr⁻¹. Missing predictors may be left blank. `SSY` must be finite and non-negative.
+- **Sediment inventory.** `dam_id`, `built_year`, `total_capacity_m3`, `dead_capacity_m3`, `basin_area_km2` and `upstream_ids`. List direct upstream reservoir IDs separated by semicolons. Leave the field blank for headwater reservoirs.
+- **Daily discharge.** `date` (YYYY-MM-DD), `dam_id` and `flow_m3s` (m³ s⁻¹). Supply one value per required dam and day.
+- **Annual SSY for trapping.** `year`, `dam_id` and `ssy_t_km2_yr` for the full upstream drainage area of each reservoir. Prepare these basin means from the spatial SSY inputs before running the trapping example.
+- **Hydropower inventory.** `dam_id`, `built_year`, `active_capacity_m3`, `dead_capacity_m3`, `reservoir_area_km2`, `dam_height_m`, `normal_level_m`, `dead_level_m`, `intake_level_m`, `installed_capacity_mw`, `max_discharge_m3s` and `wet_months`. List consecutive wet-season months within the calendar year separated by semicolons. The optional `efficiency` defaults to 0.90.
 
-## Run with locally held inputs
+The historical examples start from original storage capacity in 1980 or the commissioning year, whichever is later. The trapping example allocates incremental annual sediment using daily discharge squared and routes sediment through the supplied reservoir network. It uses a 30-day window for the Brune–Gill M trapping curve and deducts deposited volume from stored water before release.
 
-Paths below are placeholders to private files on your own computer. Input schemas, units and missing-value rules are in [input schemas](docs/input_schemas.md).
+The hydropower examples use identical inventories and discharge. The sediment run takes annual increments from `trapped_t` in `annual_sediment.csv`. It applies each calendar year's accumulated sediment after generation on the last day of the wet season. The new capacity takes effect the following day. Both scripts report daily and annual generation in MWh. The sediment run reports signed loss as baseline generation minus sediment-scenario generation.
 
-```bash
-python scripts/01_train_ssy.py --input /path/to/private/ssy.csv --output outputs/ssy
+## License
 
-python scripts/02_historical_sediment.py --dams /path/to/private/sediment_dams.csv --discharge /path/to/private/discharge.csv --ssy /path/to/private/annual_ssy.csv --output outputs/sediment
+MIT License
 
-python scripts/03_historical_hydropower_baseline.py --dams /path/to/private/hydropower_dams.csv --discharge /path/to/private/discharge.csv --output outputs/baseline
+Copyright (c) 2026 Rui Deng
 
-python scripts/04_historical_hydropower_sediment.py --dams /path/to/private/hydropower_dams.csv --discharge /path/to/private/discharge.csv --annual-sediment outputs/sediment/annual_sediment.csv --baseline outputs/baseline/daily_generation.csv --output outputs/sediment_hydropower
-```
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-Use a new output directory for each run. The scripts refuse to overwrite non-empty output directories. Generated model weights and result files are local artifacts and are excluded from version control; do not add them to a public release.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-## Documentation
-
-- [Input schemas and units](docs/input_schemas.md)
-- [Methods and boundary assumptions](docs/methods.md)
-- [SSY core model](docs/ssy.md)
-- [Historical sediment kernel](docs/sediment.md)
-- [Historical hydropower kernels](docs/hydropower.md)
-- [Data availability and confidentiality](DATA_AVAILABILITY.md)
-- [Reproducibility and software verification](docs/reproducibility.md)
-- [Code availability wording and citation](docs/code_availability.md)
-
-## Citation, versioning and license
-
-The code is released under the [MIT License](LICENSE). Cite a versioned release rather than a moving branch; citation metadata are in [CITATION.cff](CITATION.cff).
-
-Repository: https://github.com/Dr-jf/HMA-SSY-Sediment-Hydropower
-
-Release: https://github.com/Dr-jf/HMA-SSY-Sediment-Hydropower/releases/tag/v1.0.0
-
-A GitHub URL is not a DOI. No DOI or journal endorsement is claimed. For long-term citation, a matching release can also be deposited in a DOI-minting archive such as Zenodo; add the identifier only after the deposit exists.
-
-## Contact
-
-For software questions, open a GitHub issue. Do not post confidential data in issues or pull requests. Questions about access to research data should be directed privately to the corresponding author using the contact information in the associated manuscript.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

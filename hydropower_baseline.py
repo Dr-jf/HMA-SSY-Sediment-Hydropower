@@ -1,16 +1,11 @@
-"""Shared historical hydropower and annual active-capacity-update equations.
-
-Only artificial tests are distributed. Prepared inputs remain the user's data.
-The sediment scenario starts with zero accumulated sediment at study entry.
-"""
+"""Historical baseline hydropower and shared daily reservoir operation."""
 
 from __future__ import annotations
 
 import argparse
-import calendar
 import csv
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 import hashlib
 import json
 import math
@@ -22,7 +17,6 @@ import pandas as pd
 
 
 SECONDS_PER_DAY = 86400.0
-SEDIMENT_DENSITY_T_M3 = 1.2
 METHOD_VERSION = "historical-annual-active-capacity-v1"
 DAILY_COLUMNS = [
     "date", "dam_id", "season", "flow_m3s", "active_capacity_start_m3",
@@ -177,27 +171,6 @@ def daily_energy_mwh(
     return min(24 * dam.installed_capacity_mw, max(0.0, energy)), mean_head
 
 
-def allocate_cumulative_sediment(dam: HydropowerDam, volume_m3: float) -> dict[str, float]:
-    """Allocate cumulative deposited volume once, never add cumulative values twice."""
-    volume = _finite(volume_m3, "cumulative deposited volume", 0)
-    bottom = dam.normal_level_m - dam.dam_height_m
-    dead_fraction = (dam.dead_level_m - bottom) / (dam.normal_level_m - bottom)
-    dead = min(dam.dead_capacity_m3, volume * dead_fraction)
-    active = min(dam.active_capacity_m3, volume * (1 - dead_fraction))
-    excess = max(0.0, volume - dead - active)
-    transfer = min(dam.active_capacity_m3 - active, excess)
-    active += transfer
-    excess -= transfer
-    transfer = min(dam.dead_capacity_m3 - dead, excess)
-    dead += transfer
-    excess -= transfer
-    if abs(volume - dead - active - excess) > max(1e-5, volume * 1e-12):
-        raise ArithmeticError("Sediment allocation does not conserve volume")
-    return {"active_loss_m3": active, "dead_loss_m3": dead,
-            "active_capacity_m3": max(0.0, dam.active_capacity_m3 - active),
-            "unallocated_m3": max(0.0, excess)}
-
-
 def _period(start_year: int, end_year: int) -> tuple[int, int]:
     start = _integer(start_year, "start_year")
     end = _integer(end_year, "end_year")
@@ -259,28 +232,6 @@ def _discharge_series(dams: list[HydropowerDam], frame: pd.DataFrame, start: int
     return result
 
 
-def _annual_increments(dams: list[HydropowerDam], frame: pd.DataFrame, start: int, end: int) -> dict[str, dict[int, float]]:
-    required = {"dam_id", "year", "trapped_t"}
-    if not required.issubset(frame.columns):
-        raise ValueError("Annual sediment requires dam_id, year, trapped_t (annual incremental tonnes)")
-    data = frame.copy()
-    data["dam_id"] = data.dam_id.map(_identifier)
-    data["year"] = data.year.map(lambda y: _integer(y, "sediment year"))
-    if not data.year.between(1980, 2019).all():
-        raise ValueError("Only annual increments within 1980-2019 are accepted")
-    if data.duplicated(["dam_id", "year"]).any():
-        raise ValueError("Duplicate dam_id/year annual sediment record")
-    result = {}
-    for dam in dams:
-        years = list(range(max(start, dam.built_year), end + 1))
-        rows = data[(data.dam_id == dam.dam_id) & data.year.isin(years)].sort_values("year")
-        if rows.year.tolist() != years:
-            raise ValueError(f"Missing operational annual sediment increment for dam {dam.dam_id}")
-        masses = [_finite(v, "annual trapped_t", 0) for v in rows.trapped_t]
-        result[dam.dam_id] = dict(zip(years, masses))
-    return result
-
-
 def _season_end(day: date, wet_months: tuple[int, ...]) -> date:
     wet = day.month in wet_months
     year, month = day.year, day.month
@@ -311,10 +262,12 @@ def _wet_retention_target(capacity: float, storage: float, flows: np.ndarray, qm
     return float(ordered[-1])
 
 
-def _simulate_one(dam: HydropowerDam, flows: pd.Series, increments: dict[int, float] | None) -> list[dict]:
+def _simulate_one(
+    dam: HydropowerDam, flows: pd.Series, capacity_updates: dict[date, dict[str, float]],
+) -> list[dict]:
     storage = capacity = dam.active_capacity_m3
     cumulative_volume = 0.0
-    geometry = allocate_cumulative_sediment(dam, 0)
+    geometry = dict(active_loss_m3=0.0, dead_loss_m3=0.0, unallocated_m3=0.0)
     dates, discharge = flows.index, flows.to_numpy(dtype=float)
     rows = []
     wet_stop, extra_target = -1, 0.0
@@ -358,11 +311,10 @@ def _simulate_one(dam: HydropowerDam, flows: pd.Series, increments: dict[int, fl
             energy, head = daily_energy_mwh(dam, capacity, storage, s_before_update, route)
         storage = s_before_update
         capacity_spill = 0.0
-        update_day = date(day.year, dam.wet_months[-1], calendar.monthrange(day.year, dam.wet_months[-1])[1])
-        if increments is not None and day == update_day:
-            # The full calendar-year increment is concentrated at this wet end.
-            cumulative_volume = math.fsum([cumulative_volume, increments[day.year] / SEDIMENT_DENSITY_T_M3])
-            geometry = allocate_cumulative_sediment(dam, cumulative_volume)
+        if day in capacity_updates:
+            # Apply the new capacity after generation and spill any excess water.
+            geometry = capacity_updates[day]
+            cumulative_volume = geometry["cumulative_sediment_m3"]
             capacity = geometry["active_capacity_m3"]
             if capacity > c0:
                 raise ArithmeticError("Nonnegative sediment increased active capacity")
@@ -392,14 +344,17 @@ def _simulate_one(dam: HydropowerDam, flows: pd.Series, increments: dict[int, fl
     return rows
 
 
-def _simulate(dams: Sequence[HydropowerDam], discharge: pd.DataFrame, annual_sediment: pd.DataFrame | None, start_year: int, end_year: int) -> pd.DataFrame:
+def _simulate(
+    dams: Sequence[HydropowerDam], discharge: pd.DataFrame, start_year: int, end_year: int,
+    capacity_updates: dict[str, dict[date, dict[str, float]]] | None = None,
+) -> pd.DataFrame:
     start, end = _period(start_year, end_year)
     selected = _dams_checked(dams)
     flows = _discharge_series(selected, discharge, start, end)
-    increments = None if annual_sediment is None else _annual_increments(selected, annual_sediment, start, end)
+    schedules = {} if capacity_updates is None else capacity_updates
     rows = []
     for dam in selected:
-        rows.extend(_simulate_one(dam, flows[dam.dam_id], None if increments is None else increments[dam.dam_id]))
+        rows.extend(_simulate_one(dam, flows[dam.dam_id], schedules.get(dam.dam_id, {})))
     result = pd.DataFrame(rows, columns=DAILY_COLUMNS)
     result["date"] = pd.to_datetime(result["date"])
     return result.sort_values(["dam_id", "date"]).reset_index(drop=True)
@@ -407,36 +362,7 @@ def _simulate(dams: Sequence[HydropowerDam], discharge: pd.DataFrame, annual_sed
 
 def simulate_baseline(dams: Sequence[HydropowerDam], discharge: pd.DataFrame, start_year: int = 1980, end_year: int = 2019) -> pd.DataFrame:
     """Simulate fixed initial capacity; initialize full storage at study entry."""
-    return _simulate(dams, discharge, None, start_year, end_year)
-
-
-def simulate_sediment(dams: Sequence[HydropowerDam], discharge: pd.DataFrame, annual_sediment: pd.DataFrame, start_year: int = 1980, end_year: int = 2019) -> pd.DataFrame:
-    """Simulate annual wet-end capacity updates from incremental trapped_t."""
-    return _simulate(dams, discharge, annual_sediment, start_year, end_year)
-
-
-def calculate_net_loss(baseline: pd.DataFrame, sediment: pd.DataFrame) -> pd.DataFrame:
-    """Strict keyed subtraction, preserving negative daily generation differences.
-
-    This in-memory function checks keys and energy; callers must supply paired
-    scenarios with the same forcing and parameters. The CLI additionally
-    verifies their file fingerprints and study period.
-    """
-    required = {"date", "dam_id", "energy_mwh"}
-    left, right = _dated_frame(baseline, required), _dated_frame(sediment, required)
-    for frame in (left, right):
-        values = pd.to_numeric(frame.energy_mwh, errors="raise").to_numpy(dtype=float)
-        if not np.isfinite(values).all() or (values < 0).any():
-            raise ValueError("Scenario energy must be finite and nonnegative")
-        frame["energy_mwh"] = values
-    keys = ["dam_id", "date"]
-    left_keys = set(map(tuple, left[keys].itertuples(index=False, name=None)))
-    right_keys = set(map(tuple, right[keys].itertuples(index=False, name=None)))
-    if left_keys != right_keys:
-        raise ValueError("Baseline and sediment daily keys differ; no rows may be discarded")
-    result = right.merge(left[keys + ["energy_mwh"]].rename(columns={"energy_mwh": "baseline_energy_mwh"}), on=keys, how="left", validate="one_to_one")
-    result["net_loss_mwh"] = result.baseline_energy_mwh - result.energy_mwh
-    return result.sort_values(keys).reset_index(drop=True)
+    return _simulate(dams, discharge, start_year, end_year)
 
 
 def _read_prepared_csv(path: Path | str) -> pd.DataFrame:
@@ -515,67 +441,47 @@ def _write_outputs(output: Path, daily: pd.DataFrame, metadata: dict) -> None:
     (output / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
 
 
-def _parser(sediment: bool) -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Historical hydropower with study-entry initialization (1980-2019 only).")
+def _parser(description: str) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--dams", required=True, type=Path)
     parser.add_argument("--discharge", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--start-year", type=int, default=1980)
     parser.add_argument("--end-year", type=int, default=2019)
-    if sediment:
-        parser.add_argument("--annual-sediment", required=True, type=Path)
-        parser.add_argument("--baseline", required=True, type=Path, help="Baseline daily_generation.csv with adjacent manifest.json")
     return parser
 
 
-def _cli(argv: Sequence[str] | None, sediment: bool) -> None:
-    parser = _parser(sediment)
+def _load_cli_inputs(args: argparse.Namespace):
+    _empty_output(args.output)
+    start, end = _period(args.start_year, args.end_year)
+    hashes = {"dams_sha256": _sha256(args.dams), "discharge_sha256": _sha256(args.discharge)}
+    dams = load_dams_csv(args.dams)
+    discharge = _read_prepared_csv(args.discharge)
+    metadata = dict(
+        method_version=METHOD_VERSION, start_year=start, end_year=end,
+        initialization="full original active storage and zero sediment at study/commissioning entry",
+        inputs=hashes, implementation_sha256=_sha256(Path(__file__)),
+    )
+    return dams, discharge, metadata
+
+
+def _check_cli_inputs(args: argparse.Namespace, hashes: dict[str, str]) -> None:
+    if _sha256(args.dams) != hashes["dams_sha256"] or _sha256(args.discharge) != hashes["discharge_sha256"]:
+        raise ValueError("Parameter or discharge input changed during calculation")
+
+
+def baseline_cli(argv: Sequence[str] | None = None) -> None:
+    parser = _parser("Fixed-capacity historical hydropower generation (1980-2019).")
     args = parser.parse_args(argv)
     try:
-        _empty_output(args.output)
-        start, end = _period(args.start_year, args.end_year)
-        hashes = {"dams_sha256": _sha256(args.dams), "discharge_sha256": _sha256(args.discharge)}
-        dams = load_dams_csv(args.dams)
-        q = _read_prepared_csv(args.discharge)
-        metadata = dict(method_version=METHOD_VERSION, start_year=start, end_year=end,
-                        initialization="full original active storage and zero sediment at study/commissioning entry",
-                        inputs=hashes.copy(), implementation_sha256=_sha256(Path(__file__)))
-        if sediment:
-            baseline_manifest = json.loads(args.baseline.with_name("manifest.json").read_text(encoding="utf-8"))
-            if (baseline_manifest.get("status") != "COMPLETED"
-                    or baseline_manifest.get("model") != "historical_hydropower_baseline"
-                    or baseline_manifest.get("method_version") != METHOD_VERSION
-                    or baseline_manifest.get("implementation_sha256") != metadata["implementation_sha256"]
-                    or baseline_manifest.get("start_year") != start
-                    or baseline_manifest.get("end_year") != end
-                    or baseline_manifest.get("inputs") != hashes
-                    or baseline_manifest.get("daily_csv_sha256") != _sha256(args.baseline)):
-                raise ValueError("Baseline provenance mismatch: require identical parameter/forcing SHA256, implementation, period and intact daily file")
-            annual_hash = _sha256(args.annual_sediment)
-            increments = _read_prepared_csv(args.annual_sediment)
-            adjusted = simulate_sediment(dams, q, increments, start, end)
-            baseline = _read_prepared_csv(args.baseline)
-            daily = calculate_net_loss(baseline, adjusted)
-            metadata["model"] = "historical_hydropower_annual_sediment"
-            metadata["inputs"].update(annual_sediment_sha256=annual_hash, baseline_daily_sha256=_sha256(args.baseline))
-            metadata["signed_net_loss"] = True
-            if _sha256(args.annual_sediment) != annual_hash:
-                raise ValueError("Annual sediment input changed during calculation")
-        else:
-            daily = simulate_baseline(dams, q, start, end)
-            metadata["model"] = "historical_hydropower_baseline"
-        if _sha256(args.dams) != hashes["dams_sha256"] or _sha256(args.discharge) != hashes["discharge_sha256"]:
-            raise ValueError("Parameter or discharge input changed during calculation")
+        dams, discharge, metadata = _load_cli_inputs(args)
+        daily = simulate_baseline(dams, discharge, metadata["start_year"], metadata["end_year"])
+        _check_cli_inputs(args, metadata["inputs"])
+        metadata["model"] = "historical_hydropower_baseline"
         _write_outputs(args.output, daily, metadata)
     except (ValueError, ArithmeticError, OSError, KeyError) as exc:
         parser.exit(2, f"Input or calculation error: {exc}\n")
 
 
-def baseline_cli(argv: Sequence[str] | None = None) -> None:
-    """Command-line adapter for the fixed-capacity historical baseline."""
-    _cli(argv, sediment=False)
-
-
-def sediment_cli(argv: Sequence[str] | None = None) -> None:
-    """Command-line adapter for annual sediment updates and strict paired losses."""
-    _cli(argv, sediment=True)
+if __name__ == "__main__":
+    baseline_cli()

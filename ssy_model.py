@@ -1,9 +1,14 @@
-"""Pure 17-predictor square-root SSY training core. Author: Rui Deng.
+#!/usr/bin/env python3
+"""Train the 17-predictor square-root SSY model. Author: Rui Deng.
 
-The inherited recipe is fixed; no parameter search or affine calibration is
-performed. Importing this module never fits a model or reads private data.
+The default training table has 1,963 records (1,911 + 52).
+SSY is annual specific sediment yield in tonnes per square kilometre per year.
+DeltaG and DeltaSC also accept the corresponding delta-symbol column names.
+Requires NumPy, pandas, scikit-learn and XGBoost.
 """
 
+import argparse
+import csv
 from dataclasses import dataclass
 import hashlib
 from importlib.metadata import version
@@ -27,12 +32,7 @@ TEST_FRACTION = 0.30
 
 @dataclass(frozen=True)
 class SSYConfig:
-    """Run settings; smaller tree counts support artificial smoke tests.
-
-    The default sample count is user-reported, not independently confirmed.
-    Changing ``expected_samples`` changes only the count check, not the split
-    ratio. Changing ``member_trees`` departs from the inherited full recipe.
-    """
+    """Run settings for the five-member ensemble."""
 
     expected_samples: int = 1963
     split_seed: int = 42
@@ -113,13 +113,7 @@ def _sha256(path):
 
 
 def train_ssy(frame, output_dir, *, config=SSYConfig()):
-    """Fit five members on the 70% training rows and return saved metadata.
-
-    Only five native model JSON files and aggregate metadata are written.
-    Observations, predictions, row identifiers and input paths are never saved.
-    A nonempty destination is rejected. Private fitted weights must remain in
-    local, untracked output storage.
-    """
+    """Fit the training rows and save five model JSON files and metadata."""
     if not isinstance(config, SSYConfig):
         raise ValueError("config must be an SSYConfig instance.")
     X = _features(frame)
@@ -130,7 +124,6 @@ def train_ssy(frame, output_dir, *, config=SSYConfig()):
     if output.is_symlink() or (output.exists() and (not output.is_dir() or any(output.iterdir()))):
         raise FileExistsError("Output must be a new or empty directory; existing files are preserved.")
 
-    # Dependency imports occur only when an explicit training call is made.
     from sklearn.model_selection import train_test_split
     import xgboost as xgb
 
@@ -152,7 +145,7 @@ def train_ssy(frame, output_dir, *, config=SSYConfig()):
             monotone_constraints=MONOTONIC_DIRECTIONS, n_estimators=trees,
             random_state=config.model_seed, n_jobs=config.threads, verbosity=0,
         )
-        # The 30% held-out responses are never passed to fit or early stopping.
+        # Fit each member on its selected training rows.
         model.fit(X.iloc[selected], np.sqrt(y[selected]), verbose=False)
         filename = f"member_{index + 1:02d}.json"
         path = output / filename
@@ -180,7 +173,7 @@ def train_ssy(frame, output_dir, *, config=SSYConfig()):
         "versions": {"python": platform.python_version(), **{
             package: version(package) for package in ("numpy", "pandas", "scikit-learn", "xgboost")
         }},
-        "recipe_status": "Inherited previously selected parameters; not retuned or validated on the user-reported 1963-record input.",
+        "recipe_status": "Fixed settings from model development, without retuning for the expanded input.",
     }
     (output / "metadata.json").write_text(json.dumps(metadata, indent=2, allow_nan=False) + "\n", encoding="utf-8")
     return metadata
@@ -223,3 +216,33 @@ def predict_ssy(model_dir, frame):
     if not np.isfinite(prediction).all():
         raise ValueError("Model produced nonfinite SSY predictions.")
     return prediction
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(
+        description="Train the fixed 17-predictor SSY ensemble.",
+        epilog="Required CSV columns: " + ", ".join((*FEATURES, "SSY")) + ".",
+    )
+    parser.add_argument("--input", type=Path, required=True, help="Private UTF-8 CSV with one station-year record per row.")
+    parser.add_argument("--output", type=Path, required=True, help="New or empty output directory for the fitted models.")
+    parser.add_argument("--expected-samples", type=int, default=1963, help="Required row count (default: 1963).")
+    parser.add_argument("--split-seed", type=int, default=42, help="Random seed for the fixed 70:30 row split.")
+    parser.add_argument("--threads", type=int, default=1, help="CPU threads per sequentially fitted member.")
+    args = parser.parse_args(argv)
+    try:
+        config = SSYConfig(expected_samples=args.expected_samples, split_seed=args.split_seed, threads=args.threads)
+        with args.input.open(encoding="utf-8-sig", newline="") as stream:
+            header = next(csv.reader(stream), [])
+        if len(header) != len(set(header)):
+            raise ValueError("Duplicate CSV column names are not allowed.")
+        frame = pd.read_csv(args.input, float_precision="round_trip")
+        metadata = train_ssy(frame, args.output, config=config)
+    except (ValueError, OSError) as error:
+        parser.error(str(error))
+    counts = metadata["sample_counts"]
+    print(f"Saved five model members; training rows: {counts['training']}; held-out rows: {counts['test']}.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

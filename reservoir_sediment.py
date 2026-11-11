@@ -1,16 +1,21 @@
-"""Historical reservoir sediment reference model using prepared inputs.
+#!/usr/bin/env python3
+"""Historical reservoir sediment model (1980–2019). Author: Rui Deng.
 
-Author: Rui Deng
-
-The archived sediment-volume-as-water-sink convention is retained explicitly.
-The model starts at the study boundary, not at an unobserved pre-study state.
+Run with --help. The dam CSV supplies identifiers, construction years, total and
+dead capacity (m³), basin area (km²), and semicolon-separated direct upstream IDs.
+Discharge is daily in m³/s and basin SSY is annual in t km⁻² yr⁻¹. The model
+starts at the study boundary and retains the legacy water deduction by deposited
+volume. Python 3.11 or 3.12, NumPy, and pandas are required.
 """
 
 from __future__ import annotations
 
+import argparse
+import csv
 from collections import deque
 from dataclasses import dataclass
 from numbers import Real
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -330,3 +335,60 @@ def summarize_annual(daily: pd.DataFrame) -> pd.DataFrame:
     amounts["cumulative_trapped_t"] = grouped["cumulative_trapped_t"].last()
     amounts["is_operating"] = grouped["is_operating"].any()
     return amounts.reset_index()
+
+
+def _read_csv(path: Path, *, dtype: dict[str, type]) -> pd.DataFrame:
+    """Validate the original header before pandas can rename duplicate fields."""
+    with path.open(encoding="utf-8-sig", newline="") as stream:
+        header = next(csv.reader(stream), [])
+        if not header or any(not name.strip() for name in header):
+            raise ValueError("CSV column headers must be nonempty")
+        if len(header) != len(set(header)):
+            raise ValueError("Duplicate CSV column headers are not allowed")
+        stream.seek(0)
+        return pd.read_csv(stream, dtype=dtype, keep_default_na=False)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Historical sediment simulation, without prehistory (1980--2019 only).")
+    parser.add_argument("--dams", type=Path, required=True)
+    parser.add_argument("--discharge", type=Path, required=True)
+    parser.add_argument("--ssy", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--start-year", type=int, default=1980)
+    parser.add_argument("--end-year", type=int, default=2019)
+    args = parser.parse_args()
+    try:
+        if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
+            raise ValueError("Output must be a new or empty directory; existing files are never overwritten")
+        table = _read_csv(args.dams, dtype={"dam_id": str, "upstream_ids": str})
+        required = {"dam_id", "built_year", "total_capacity_m3", "dead_capacity_m3", "basin_area_km2", "upstream_ids"}
+        if not required.issubset(table.columns):
+            raise ValueError("Dam CSV is missing required prepared parameter columns")
+        dams = []
+        for row in table.itertuples(index=False):
+            upstream_text = str(row.upstream_ids).strip()
+            upstream = tuple(part.strip() for part in upstream_text.split(";")) if upstream_text else ()
+            try:
+                dams.append(SedimentDam(
+                    str(row.dam_id), float(row.built_year), float(row.total_capacity_m3),
+                    float(row.dead_capacity_m3), float(row.basin_area_km2), upstream,
+                ))
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Dam parameters must be complete numeric values") from exc
+        discharge = _read_csv(args.discharge, dtype={"dam_id": str})
+        ssy = _read_csv(args.ssy, dtype={"dam_id": str})
+        daily = simulate_historical_sediment(
+            dams, discharge, ssy, start_year=args.start_year, end_year=args.end_year,
+        )
+        annual = summarize_annual(daily)
+        args.output.mkdir(parents=True, exist_ok=True)
+        daily.to_csv(args.output / "daily_sediment.csv", index=False)
+        annual.to_csv(args.output / "annual_sediment.csv", index=False)
+    except (OSError, ValueError, TypeError) as exc:
+        parser.error(str(exc))
+    print(f"Wrote daily_sediment.csv and annual_sediment.csv for {args.start_year}--{args.end_year}")
+
+
+if __name__ == "__main__":
+    main()
