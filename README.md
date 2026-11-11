@@ -6,7 +6,7 @@ This repository contains the Python examples for specific sediment yield (SSY), 
 
 | Script | Calculation |
 | --- | --- |
-| [`ssy_model.py`](ssy_model.py) | Fit the 17-predictor XGBoost ensemble on square-root SSY. The default 70/30 split of 1,963 records (1,911 + 52) gives 1,374 training and 589 validation records. |
+| [`ssy_model.py`](ssy_model.py) | Fit the 17-predictor XGBoost ensemble on square-root SSY. The default 70/30 split of 1,963 records gives 1,374 training and 589 validation records. |
 | [`reservoir_sediment.py`](reservoir_sediment.py) | Calculate daily and annual trapped sediment for the 325-reservoir network. |
 | [`hydropower_baseline.py`](hydropower_baseline.py) | Calculate daily generation with fixed original active storage. |
 | [`hydropower_sedimentation.py`](hydropower_sedimentation.py) | Calculate daily generation with annual active-storage updates and pair it with the baseline to estimate generation loss. |
