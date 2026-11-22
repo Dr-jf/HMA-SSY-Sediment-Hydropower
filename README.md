@@ -1,6 +1,6 @@
 # Sediment yield, reservoir trapping and hydropower in High Mountain Asia
 
-This repository contains the Python examples for specific sediment yield (SSY), reservoir sediment trapping and historical hydropower generation in High Mountain Asia. The input tables are held separately.
+This repository contains four Python examples for specific sediment yield (SSY), reservoir sediment trapping and historical hydropower generation in High Mountain Asia, together with the supplementary inventory of 325 reservoirs and 179 hydropower stations.
 
 ## Scripts
 
@@ -10,6 +10,36 @@ This repository contains the Python examples for specific sediment yield (SSY), 
 | [`reservoir_sediment.py`](reservoir_sediment.py) | Calculate daily and annual trapped sediment for the 325-reservoir network. |
 | [`hydropower_baseline.py`](hydropower_baseline.py) | Calculate daily generation with fixed original active storage. |
 | [`hydropower_sedimentation.py`](hydropower_sedimentation.py) | Calculate daily generation with annual active-storage updates and pair it with the baseline to estimate generation loss. |
+
+## Reservoir inventory
+
+[Supplementary Data - HMA reservoir inventory.xlsx](Supplementary%20Data%20-%20HMA%20reservoir%20inventory.xlsx) contains 325 reservoir records, including 179 in the `Hydropower & irrigation` category and 146 in the `Irrigation` category. The `Reservoir inventory` worksheet holds the data, and the workbook's `README` worksheet defines the 19 fields.
+
+| Field | Parameter or description | Unit | Records with values |
+| --- | --- | --- | --- |
+| `damkey` | Unique study identifier | — | 325 |
+| `dam_name` | English reservoir or dam label used in the model inventory | — | 325 |
+| `longitude_deg_e` | Longitude of the registered model point | °E | 325 |
+| `latitude_deg_n` | Latitude of the registered model point | °N | 325 |
+| `construction_year` | Recorded dam construction year | year | 325 |
+| `mainuse` | Analysis category | — | 325 |
+| `reservoir_area_km2` | Reservoir surface area used in the model | km² | 325 |
+| `total_storage_km3` | Initial total storage, equal to active plus dead storage | km³ | 325 |
+| `active_storage_km3` | Initial active storage above the dead-water level | km³ | 325 |
+| `dead_storage_km3` | Initial dead storage below the dead-water level | km³ | 325 |
+| `normal_operating_level_m` | Normal pool elevation, the upper operating water level | m | 325 |
+| `dead_water_level_m` | Dead-water level, the lower operating water level | m | 325 |
+| `morphology_m` | Morphology exponent for the volume–depth relation | dimensionless | 325 |
+| `max_generation_head_m` | Maximum modelled generating head at the normal operating level | m | 179 |
+| `installed_capacity_mw` | Installed electrical generating capacity used in the model | MW | 179 |
+| `max_turbine_flow_m3_s` | Maximum turbine discharge imposed in the hydropower simulation | m³ s⁻¹ | 179 |
+| `annual_generation_ref_gwh_yr` | Reported annual generation reference | GWh yr⁻¹ | 158 |
+| `annual_sediment_retention_ref_mt_yr` | Reported or derived comparable annual sediment mass retained by the reservoir | Mt yr⁻¹ | 53 |
+| `reference_url` | Source reference URL | — | 325 |
+
+Water-level elevations retain the source site's datum. The morphology exponent describes the volume–depth relation and uses the geometric estimate of surface area × maximum depth proxy / initial total volume, with all quantities in SI units. A slash (`/`) marks an unavailable or inapplicable value.
+
+To prepare the model CSVs described below, map `damkey` to `dam_id` and convert storage from km³ to m³ by multiplying by 10⁹. Use the recorded construction year consistently with the scripts' activation-year convention. Prepare the remaining model columns, reservoir-network relationships and forcing series using the field definitions below.
 
 ## Running the examples
 
